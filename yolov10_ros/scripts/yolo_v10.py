@@ -7,7 +7,6 @@ import torch
 import rospy
 import numpy as np
 from ultralytics import YOLO
-#from time import time
 import time
 
 from std_msgs.msg import Header
@@ -51,9 +50,6 @@ class Yolo_Dect:
             self.device = 'cuda'
 
         self.model = YOLO(weight_path)
-#        self.model.names = COCO_CLASSES
-#        self.model.fuse()
-
         self.model.conf = conf
         self.color_image = Image()
         self.getImageStatus = False
@@ -85,8 +81,13 @@ class Yolo_Dect:
         self.color_image = np.frombuffer(image.data, dtype=np.uint8).reshape(
             image.height, image.width, -1)
 
+        # 영상 크기를 640x480으로 리사이즈
+        self.color_image = cv2.resize(self.color_image, (640, 480))
+
+        # 영상 색상 변환
         self.color_image = cv2.cvtColor(self.color_image, cv2.COLOR_BGR2RGB)
 
+        # 사람 탐지
         results = self.model(self.color_image, show=False, conf=0.8)
 
         self.dectshow(results, image.height, image.width)
@@ -97,7 +98,8 @@ class Yolo_Dect:
         self.frame = self.color_image.copy()  # 원본 RGB 이미지를 기준으로 박스 그리기
         print(str(results[0].speed['inference']))
         fps = 1000.0 / results[0].speed['inference']
-        cv2.putText(self.frame, f'FPS: {int(fps)}', (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
+        fps_int = int(fps)
+        cv2.putText(self.frame, f'FPS: {fps_int}', (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
                 0.6, (0, 255, 0), 2, cv2.LINE_AA)
 
         person_detected = False  # 사람 인식 여부 플래그
@@ -124,9 +126,12 @@ class Yolo_Dect:
             conf = boundingBox.probability
             label = f"person {conf:.2f}"
 
+            # 바운딩 박스 그리기
             cv2.rectangle(self.frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(self.frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5, (0, 255, 0), 2)
+
+            # 바운딩 박스 내부 왼쪽 위에 텍스트 표시
+            cv2.putText(self.frame, label, (x1+5, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.5, (0, 255, 0), 2, cv2.LINE_AA)
 
         self.position_pub.publish(self.boundingBoxes)
         self.publish_image(self.frame, height, width)
@@ -134,7 +139,7 @@ class Yolo_Dect:
         if self.visualize:
             cv2.imshow('YOLOv10', self.frame)
 
-        #  사람 인식되었으면 이미지 저장
+        # 사람 인식되었으면 이미지 저장
         if person_detected:
             current_time = time.time()
             if current_time - self.last_saved_time >= self.save_interval:
@@ -152,17 +157,10 @@ class Yolo_Dect:
                 next_index = max(numbers) + 1 if numbers else 1
 
                 # 파일 이름 저장
-                save_name = os.path.join(save_path, f"person_{next_index}.jpg")
+                save_name = os.path.join(save_path, f"person_{str(next_index).zfill(4)}.jpg")
                 cv2.imwrite(save_name, self.frame)
                 rospy.loginfo(f"[YOLOv10] 사람 캡처 저장: {save_name}")
                 self.last_saved_time = current_time  # 마지막 저장 시각 갱신
-
-#                timestamp = int(current_time * 1000)  # ms 단위 시간
-#                save_name = os.path.join(save_path, f"person_{timestamp}.jpg")
-#                cv2.imwrite(save_name, self.frame)
-#                rospy.loginfo(f"[YOLOv10] 사람 캡처 저장: {save_name}")
-#                self.last_saved_time = current_time  # 마지막 저장 시각 갱신
-#
 
     def publish_image(self, imgdata, height, width):
         image_temp = Image()
