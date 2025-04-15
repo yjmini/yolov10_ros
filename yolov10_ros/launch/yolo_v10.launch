@@ -10,7 +10,7 @@
   <node pkg="yolov10_ros" type="yolo_v10.py" name="yolov10_ros" output="screen" >
     <param name="weight_path"       value="/home/user/yolov10_ros/yolov10_ros/weights/yolov10m.pt"/>
     <!-- <param name="image_topic"       value="/camera/color/image_raw" /> -->
-    <param name="image_topic"       value="/uoais/targetmask_img" />
+    <param name="image_topic"       value="/camera/color/image_raw" />
     <param name="pub_topic"         value="/yolov10/BoundingBoxes" />
     <param name="camera_frame"       value="camera_color_frame"/>
     <param name="visualize"       value="true"/>
