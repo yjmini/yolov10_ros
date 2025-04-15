@@ -138,7 +138,8 @@ class Yolo_Dect:
 
         if self.visualize:
             cv2.imshow('YOLOv10', self.frame)
-
+        
+        # test
         # 사람 인식되었으면 이미지 저장
         if person_detected:
             current_time = time.time()
