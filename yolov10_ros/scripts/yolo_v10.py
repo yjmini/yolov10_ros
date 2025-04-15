@@ -88,7 +88,7 @@ class Yolo_Dect:
         self.color_image = cv2.cvtColor(self.color_image, cv2.COLOR_BGR2RGB)
 
         # 사람 탐지
-        results = self.model(self.color_image, show=False, conf=0.8)
+        results = self.model(self.color_image, show=False, conf=0.9)
 
         self.dectshow(results, image.height, image.width)
 
