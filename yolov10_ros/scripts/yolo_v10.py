@@ -12,6 +12,8 @@ import time
 from std_msgs.msg import Header
 from sensor_msgs.msg import Image
 from yolov10_ros_msgs.msg import BoundingBox, BoundingBoxes
+from geometry_msgs.msg import Point
+from cv_bridge import CvBridge
 
 COCO_CLASSES = [
     "person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train",
@@ -32,146 +34,149 @@ COCO_CLASSES = [
 
 class Yolo_Dect:
     def __init__(self):
-
-        # load parameters
         weight_path = rospy.get_param('~weight_path', '/home/user/yolov10m.pt')
         sub_topic = rospy.get_param('~image_topic', '/camera/color/image_raw')
-        pub_topic = rospy.get_param('~pub_topic'  , '/yolov10/BoundingBoxes')
-        self.camera_frame = rospy.get_param('~camera_frame', '')
-        conf = rospy.get_param('~conf', '0.5')
-        self.visualize = rospy.get_param('~visualize', 'True')
-        self.last_saved_time = 0  # 마지막으로 저장한 시각 (초)
-        self.save_interval = 7    # 저장 주기 (초)
+        pub_topic = rospy.get_param('~pub_topic', '/yolov10/BoundingBoxes')
+        self.camera_frame = rospy.get_param('~camera_frame', 'camera_color_optical_frame')
+        conf = float(rospy.get_param('~conf', '0.5'))
+        self.visualize = rospy.get_param('~visualize', True)
+        self.last_saved_time = 0
+        self.save_interval = 7
 
-        # which device will be used
-        if (rospy.get_param('/use_cpu', 'false')):
-            self.device = 'cpu'
-        else:
-            self.device = 'cuda'
+        self.bridge = CvBridge()
+        self.latest_depth = None
+        self.depth_sub = rospy.Subscriber("/camera/depth/image_rect_raw", Image, self.depth_callback)
+
+        self.person_pub = rospy.Publisher("/person_detected", Point, queue_size=10)
+
+        self.device = 'cpu' if rospy.get_param('/use_cpu', 'false') else 'cuda'
 
         self.model = YOLO(weight_path)
         self.model.conf = conf
+
         self.color_image = Image()
         self.getImageStatus = False
 
-        # Load class color
         self.classes_colors = {}
 
-        # image subscribe
-        self.image_sub = rospy.Subscriber("/camera/color/image_raw", Image, self.image_callback)
+        self.image_sub = rospy.Subscriber(sub_topic, Image, self.image_callback)
 
-        # output publishers
-        self.position_pub = rospy.Publisher(
-            pub_topic,  BoundingBoxes, queue_size=1)
+        self.position_pub = rospy.Publisher(pub_topic, BoundingBoxes, queue_size=1)
+        self.image_pub = rospy.Publisher('/yolov10/detection_image', Image, queue_size=1)
 
-        self.image_pub = rospy.Publisher(
-            '/yolov10/detection_image',  Image, queue_size=1)
+        while not self.getImageStatus and not rospy.is_shutdown():
+            rospy.loginfo("Waiting for image...")
+            rospy.sleep(1)
 
-        # if no image messages
-        while (not self.getImageStatus):
-            rospy.loginfo("waiting for image.")
-            rospy.sleep(2)
+    def depth_callback(self, msg):
+        try:
+            self.latest_depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding="passthrough")
+        except Exception as e:
+            rospy.logerr("Depth 이미지 변환 실패: %s", str(e))
 
     def image_callback(self, image):
-
         self.boundingBoxes = BoundingBoxes()
         self.boundingBoxes.header = image.header
         self.boundingBoxes.image_header = image.header
         self.getImageStatus = True
+
         self.color_image = np.frombuffer(image.data, dtype=np.uint8).reshape(
             image.height, image.width, -1)
-
-        # 영상 크기를 640x480으로 리사이즈
         self.color_image = cv2.resize(self.color_image, (640, 480))
-
-        # 영상 색상 변환
         self.color_image = cv2.cvtColor(self.color_image, cv2.COLOR_BGR2RGB)
 
-        # 사람 탐지
-        results = self.model(self.color_image, show=False, conf=0.9)
+        results = self.model(self.color_image, show=False, conf=0.8)
 
         self.dectshow(results, image.height, image.width)
 
         cv2.waitKey(3)
 
     def dectshow(self, results, height, width):
-        self.frame = self.color_image.copy()  # 원본 RGB 이미지를 기준으로 박스 그리기
-        print(str(results[0].speed['inference']))
+        self.frame = self.color_image.copy()
         fps = 1000.0 / results[0].speed['inference']
         fps_int = int(fps)
         cv2.putText(self.frame, f'FPS: {fps_int}', (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
-                0.6, (0, 255, 0), 2, cv2.LINE_AA)
+                    0.6, (0, 255, 0), 2, cv2.LINE_AA)
 
-        person_detected = False  # 사람 인식 여부 플래그
+        person_detected = False
 
         for result in results[0].boxes:
             cls_id = int(result.cls.item()) if hasattr(result.cls, "item") else int(result.cls)
-            if cls_id != 0:
-                continue  # 사람(class_id=0) 외에는 무시
 
-            person_detected = True  # 사람 인식됨
+            x1 = int(result.xyxy[0][0].item())
+            y1 = int(result.xyxy[0][1].item())
+            x2 = int(result.xyxy[0][2].item())
+            y2 = int(result.xyxy[0][3].item())
+            cx = (x1 + x2) // 2
+            cy = (y1 + y2) // 2
+
+            if cls_id != 0:
+                if self.latest_depth is not None and 0 <= cx < self.latest_depth.shape[1] and 0 <= cy < self.latest_depth.shape[0]:
+                    depth = self.latest_depth[cy, cx]
+                    if depth > 0 and not np.isnan(depth) and not np.isinf(depth):
+                        z = float(depth) / 1000.0
+                        fx, fy = 384.4789, 384.4789
+                        cx_d, cy_d = 319.7523, 245.3222
+
+                        x = (cx - cx_d) * z / fx
+                        y = (cy - cy_d) * z / fy
+
+                        point_msg = Point()
+                        point_msg.x = x
+                        point_msg.y = y
+                        point_msg.z = z
+
+                        self.person_pub.publish(point_msg)
+
+                        rospy.loginfo(f"[YOLOv10] 3D 좌표 퍼블리시: x={x:.2f}, y={y:.2f}, z={z:.2f}")
+                continue
+
+            person_detected = True
 
             boundingBox = BoundingBox()
-            boundingBox.xmin = np.int64(result.xyxy[0][0].item())
-            boundingBox.ymin = np.int64(result.xyxy[0][1].item())
-            boundingBox.xmax = np.int64(result.xyxy[0][2].item())
-            boundingBox.ymax = np.int64(result.xyxy[0][3].item())
+            boundingBox.xmin = x1
+            boundingBox.ymin = y1
+            boundingBox.xmax = x2
+            boundingBox.ymax = y2
             boundingBox.Class = "person"
             boundingBox.probability = result.conf.item()
             self.boundingBoxes.bounding_boxes.append(boundingBox)
 
-            # 시각화 - 화면에 그리기
-            x1, y1 = boundingBox.xmin, boundingBox.ymin
-            x2, y2 = boundingBox.xmax, boundingBox.ymax
-            conf = boundingBox.probability
-            label = f"person {conf:.2f}"
-
-            # 바운딩 박스 그리기
+            label = f"person {boundingBox.probability:.2f}"
             cv2.rectangle(self.frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-            # 바운딩 박스 내부 왼쪽 위에 텍스트 표시
-            cv2.putText(self.frame, label, (x1+5, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5, (0, 255, 0), 2, cv2.LINE_AA)
+            cv2.putText(self.frame, label, (x1 + 5, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.5, (0, 255, 0), 2, cv2.LINE_AA)
 
         self.position_pub.publish(self.boundingBoxes)
         self.publish_image(self.frame, height, width)
 
         if self.visualize:
             cv2.imshow('YOLOv10', self.frame)
-        
-        # test
-        # 사람 인식되었으면 이미지 저장
+
         if person_detected:
             current_time = time.time()
             if current_time - self.last_saved_time >= self.save_interval:
                 save_path = "/home/user/person_captures"
-                if not os.path.exists(save_path):
-                    os.makedirs(save_path)
+                os.makedirs(save_path, exist_ok=True)
 
-                # 기존 파일들 중 가장 큰 번호 찾기
                 existing_files = [f for f in os.listdir(save_path) if f.startswith("person_") and f.endswith(".jpg")]
-                numbers = [
-                    int(f.split("_")[1].split(".")[0])
-                    for f in existing_files
-                    if f.split("_")[1].split(".")[0].isdigit()
-                ]
+                numbers = [int(f.split("_")[1].split(".")[0]) for f in existing_files if f.split("_")[1].split(".")[0].isdigit()]
                 next_index = max(numbers) + 1 if numbers else 1
 
-                # 파일 이름 저장
-                save_name = os.path.join(save_path, f"person_{str(next_index).zfill(4)}.jpg")
+                save_name = os.path.join(save_path, f"person_{next_index}.jpg")
                 cv2.imwrite(save_name, self.frame)
                 rospy.loginfo(f"[YOLOv10] 사람 캡처 저장: {save_name}")
-                self.last_saved_time = current_time  # 마지막 저장 시각 갱신
+                self.last_saved_time = current_time
 
     def publish_image(self, imgdata, height, width):
         image_temp = Image()
         header = Header(stamp=rospy.Time.now())
         header.frame_id = self.camera_frame
+        image_temp.header = header
         image_temp.height = height
         image_temp.width = width
         image_temp.encoding = 'bgr8'
         image_temp.data = np.array(imgdata).tobytes()
-        image_temp.header = header
         image_temp.step = width * 3
         self.image_pub.publish(image_temp)
 
