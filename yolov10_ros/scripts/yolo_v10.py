@@ -114,34 +114,47 @@ class Yolo_Dect:
             cy = (y1 + y2) // 2
 
             if cls_id == 0: # 사람이 감지되면
-                person_detected_in_frame = True
-                current_time = time.time()
+                # BoundingBox 정보 
+                boundingBox = BoundingBox()
+                boundingBox.xmin = x1
+                boundingBox.ymin = y1
+                boundingBox.xmax = x2
+                boundingBox.ymax = y2
+                boundingBox.Class = "person"
+                boundingBox.probability = result.conf.item()
+                self.boundingBoxes.bounding_boxes.append(boundingBox)
 
-                # 저장 간격이 되었는지 확인하고, 이미지 저장 및 좌표 발행
+                label = f"person {boundingBox.probability:.2f}"
+                cv2.rectangle(self.frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(self.frame, label, (x1 + 5, y1 + 20), cv2.FONT_HERSHEY_SIMPLEX,
+                            0.5, (0, 255, 0), 2, cv2.LINE_AA)
+
+                # 박스가 그려진 이미지 저장 / 좌표 발행
+                current_time = time.time()
                 if current_time - self.last_saved_time >= self.save_interval:
                     save_path = "/home/user/person_captures"
                     os.makedirs(save_path, exist_ok=True)
 
-                    # 다음 저장될 파일 인덱스 계산
                     existing_files = [f for f in os.listdir(save_path) if f.startswith("person_") and f.endswith(".jpg")]
                     numbers = [int(f.split("_")[1].split(".")[0]) for f in existing_files if f.split("_")[1].split(".")[0].isdigit()]
                     next_index = max(numbers) + 1 if numbers else 1
 
                     save_name = os.path.join(save_path, f"person_{next_index}.jpg")
 
-                    # 이미지 저장 시도
                     try:
-                        cv2.imwrite(save_name, cv2.cvtColor(self.frame, cv2.COLOR_RGB2BGR)) # BGR로 변환하여 저장
+                        cv2.imwrite(save_name, cv2.cvtColor(self.frame, cv2.COLOR_RGB2BGR))
                         rospy.loginfo(f"[YOLOv10] 사람 캡처 저장: {save_name}")
-                        self.last_saved_time = current_time
+                        self.last_saved_time = current_time # 저장 성공 시 시간 갱신
 
-                        # --- 중요: 저장 성공 후 좌표와 인덱스를 함께 발행 ---
+                        # 저장 후 좌표 계산 및 인덱스 발행
                         if self.latest_depth is not None and 0 <= cx < self.latest_depth.shape[1] and 0 <= cy < self.latest_depth.shape[0]:
                             depth = self.latest_depth[cy, cx]
                             if depth > 0 and not np.isnan(depth) and not np.isinf(depth):
                                 z = float(depth) / 1000.0
-                                fx, fy = 384.4789, 384.4789
-                                cx_d, cy_d = 319.7523, 245.3222
+                                # --- 카메라 파라미터 ---
+                                fx, fy = 384.4789, 384.4789 # 
+                                cx_d, cy_d = 319.7523, 245.3222 # 
+                                # -------------------
                                 x = (cx - cx_d) * z / fx
                                 y = (cy - cy_d) * z / fy
 
@@ -149,14 +162,13 @@ class Yolo_Dect:
                                 marker_data.position.x = x
                                 marker_data.position.y = y
                                 marker_data.position.z = z
-                                marker_data.image_index = next_index # 저장된 이미지 인덱스 포함
+                                marker_data.image_index = next_index
 
-                                self.person_marker_pub.publish(marker_data) # 새 토픽으로 발행
+                                self.person_marker_pub.publish(marker_data)
                                 rospy.loginfo(f"[YOLOv10] 마커 데이터 발행: index={next_index}, x={x:.2f}, y={y:.2f}, z={z:.2f}")
-                        # --- 발행 로직 끝 ---
 
                     except Exception as e:
-                        rospy.logerr(f"이미지 저장 실패: {save_name}, 오류: {e}")
+                        rospy.logerr(f"이미지 저장 또는 마커 데이터 발행 실패: {e}")
 
 
             boundingBox = BoundingBox()
