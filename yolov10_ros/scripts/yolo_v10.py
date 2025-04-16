@@ -15,6 +15,8 @@ from yolov10_ros_msgs.msg import BoundingBox, BoundingBoxes
 from geometry_msgs.msg import Point
 from cv_bridge import CvBridge
 
+from yolov10_ros_msgs.msg import PersonMarkerData
+
 COCO_CLASSES = [
     "person", "bicycle", "car", "motorbike", "aeroplane", "bus", "train",
     "truck", "boat", "traffic light", "fire hydrant", "stop sign",
@@ -47,7 +49,8 @@ class Yolo_Dect:
         self.latest_depth = None
         self.depth_sub = rospy.Subscriber("/camera/depth/image_rect_raw", Image, self.depth_callback)
 
-        self.person_pub = rospy.Publisher("/person_detected", Point, queue_size=10)
+        #self.person_pub = rospy.Publisher("/person_detected", Point, queue_size=10)
+        self.person_marker_pub = rospy.Publisher("/person_marker_data", PersonMarkerData, queue_size=10) # Publisher
 
         self.device = 'cpu' if rospy.get_param('/use_cpu', 'false') else 'cuda'
 
@@ -98,7 +101,7 @@ class Yolo_Dect:
         cv2.putText(self.frame, f'FPS: {fps_int}', (20, 50), cv2.FONT_HERSHEY_SIMPLEX,
                     0.6, (0, 255, 0), 2, cv2.LINE_AA)
 
-        person_detected = False
+        person_detected_in_frame = False
 
         for result in results[0].boxes:
             cls_id = int(result.cls.item()) if hasattr(result.cls, "item") else int(result.cls)
@@ -110,28 +113,51 @@ class Yolo_Dect:
             cx = (x1 + x2) // 2
             cy = (y1 + y2) // 2
 
-            if cls_id != 0:
-                if self.latest_depth is not None and 0 <= cx < self.latest_depth.shape[1] and 0 <= cy < self.latest_depth.shape[0]:
-                    depth = self.latest_depth[cy, cx]
-                    if depth > 0 and not np.isnan(depth) and not np.isinf(depth):
-                        z = float(depth) / 1000.0
-                        fx, fy = 384.4789, 384.4789
-                        cx_d, cy_d = 319.7523, 245.3222
+            if cls_id == 0: # 사람이 감지되면
+                person_detected_in_frame = True
+                current_time = time.time()
 
-                        x = (cx - cx_d) * z / fx
-                        y = (cy - cy_d) * z / fy
+                # 저장 간격이 되었는지 확인하고, 이미지 저장 및 좌표 발행
+                if current_time - self.last_saved_time >= self.save_interval:
+                    save_path = "/home/user/person_captures"
+                    os.makedirs(save_path, exist_ok=True)
 
-                        point_msg = Point()
-                        point_msg.x = x
-                        point_msg.y = y
-                        point_msg.z = z
+                    # 다음 저장될 파일 인덱스 계산
+                    existing_files = [f for f in os.listdir(save_path) if f.startswith("person_") and f.endswith(".jpg")]
+                    numbers = [int(f.split("_")[1].split(".")[0]) for f in existing_files if f.split("_")[1].split(".")[0].isdigit()]
+                    next_index = max(numbers) + 1 if numbers else 1
 
-                        self.person_pub.publish(point_msg)
+                    save_name = os.path.join(save_path, f"person_{next_index}.jpg")
 
-                        rospy.loginfo(f"[YOLOv10] 3D 좌표 퍼블리시: x={x:.2f}, y={y:.2f}, z={z:.2f}")
-                continue
+                    # 이미지 저장 시도
+                    try:
+                        cv2.imwrite(save_name, cv2.cvtColor(self.frame, cv2.COLOR_RGB2BGR)) # BGR로 변환하여 저장
+                        rospy.loginfo(f"[YOLOv10] 사람 캡처 저장: {save_name}")
+                        self.last_saved_time = current_time
 
-            person_detected = True
+                        # --- 중요: 저장 성공 후 좌표와 인덱스를 함께 발행 ---
+                        if self.latest_depth is not None and 0 <= cx < self.latest_depth.shape[1] and 0 <= cy < self.latest_depth.shape[0]:
+                            depth = self.latest_depth[cy, cx]
+                            if depth > 0 and not np.isnan(depth) and not np.isinf(depth):
+                                z = float(depth) / 1000.0
+                                fx, fy = 384.4789, 384.4789
+                                cx_d, cy_d = 319.7523, 245.3222
+                                x = (cx - cx_d) * z / fx
+                                y = (cy - cy_d) * z / fy
+
+                                marker_data = PersonMarkerData()
+                                marker_data.position.x = x
+                                marker_data.position.y = y
+                                marker_data.position.z = z
+                                marker_data.image_index = next_index # 저장된 이미지 인덱스 포함
+
+                                self.person_marker_pub.publish(marker_data) # 새 토픽으로 발행
+                                rospy.loginfo(f"[YOLOv10] 마커 데이터 발행: index={next_index}, x={x:.2f}, y={y:.2f}, z={z:.2f}")
+                        # --- 발행 로직 끝 ---
+
+                    except Exception as e:
+                        rospy.logerr(f"이미지 저장 실패: {save_name}, 오류: {e}")
+
 
             boundingBox = BoundingBox()
             boundingBox.xmin = x1
@@ -153,20 +179,6 @@ class Yolo_Dect:
         if self.visualize:
             cv2.imshow('YOLOv10', self.frame)
 
-        if person_detected:
-            current_time = time.time()
-            if current_time - self.last_saved_time >= self.save_interval:
-                save_path = "/home/user/person_captures"
-                os.makedirs(save_path, exist_ok=True)
-
-                existing_files = [f for f in os.listdir(save_path) if f.startswith("person_") and f.endswith(".jpg")]
-                numbers = [int(f.split("_")[1].split(".")[0]) for f in existing_files if f.split("_")[1].split(".")[0].isdigit()]
-                next_index = max(numbers) + 1 if numbers else 1
-
-                save_name = os.path.join(save_path, f"person_{next_index}.jpg")
-                cv2.imwrite(save_name, self.frame)
-                rospy.loginfo(f"[YOLOv10] 사람 캡처 저장: {save_name}")
-                self.last_saved_time = current_time
 
     def publish_image(self, imgdata, height, width):
         image_temp = Image()

@@ -10,6 +10,7 @@ project(yolov10_ros)
 find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
+  yolov10_ros_msgs
 )
 
 ## System dependencies are found with CMake's conventions

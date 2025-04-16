@@ -7,7 +7,8 @@
   <maintainer email="sam8899yy@gmail.com">sam</maintainer>
 
   <license>APLv2</license>
-
+  
+  <depend>yolov10_ros</depend>
   <buildtool_depend>catkin</buildtool_depend>
   <build_depend>rospy</build_depend>
   <build_depend>std_msgs</build_depend>
